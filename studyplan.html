@@ -1,0 +1,287 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>IELTS Mastery Pro</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <script src="https://unpkg.com/lucide@latest"></script>
+    
+    <!-- Firebase SDKs -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.1.0/firebase-app.js";
+        import { getAuth, signInAnonymously, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.1.0/firebase-auth.js";
+        import { getFirestore, doc, setDoc, getDoc, onSnapshot, collection, deleteDoc, query } from "https://www.gstatic.com/firebasejs/11.1.0/firebase-firestore.js";
+        
+        window.Firebase = { initializeApp, getAuth, signInAnonymously, onAuthStateChanged, getFirestore, doc, setDoc, getDoc, onSnapshot, collection, deleteDoc, query };
+    </script>
+
+    <style>
+        body { -webkit-tap-highlight-color: transparent; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; background-color: #f8fafc; }
+        .pin-dot { transition: all 0.2s ease; }
+        .pin-dot.filled { background-color: #6366f1; transform: scale(1.2); }
+        .numpad-btn:active { background-color: #f1f5f9; transform: scale(0.95); }
+        #loader { display: flex; align-items: center; justify-content: center; height: 100vh; width: 100vw; background: white; position: fixed; top: 0; left: 0; z-index: 100; transition: opacity 0.5s; }
+        .hidden-loader { opacity: 0; pointer-events: none; }
+        .no-scrollbar::-webkit-scrollbar { display: none; }
+        select { -webkit-appearance: none; appearance: none; }
+    </style>
+</head>
+<body>
+    <div id="loader">
+        <div class="animate-spin rounded-full h-10 w-10 border-t-2 border-indigo-600"></div>
+    </div>
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useMemo, useEffect } = React;
+        const { initializeApp, getAuth, signInAnonymously, onAuthStateChanged, getFirestore, doc, setDoc, getDoc, onSnapshot, collection, deleteDoc } = window.Firebase;
+
+        // Firebase Config Handling
+        let firebaseConfig = {};
+        try { firebaseConfig = JSON.parse(typeof __firebase_config !== 'undefined' ? __firebase_config : '{}'); } catch (e) {}
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'ielts-pro-v1';
+
+        const Icon = ({ name, size = 24, className = "" }) => {
+            useEffect(() => { if (window.lucide) window.lucide.createIcons(); }, [name]);
+            return <i data-lucide={name} className={className} style={{ width: size, height: size }}></i>;
+        };
+
+        const translations = {
+            en: { title: 'IELTS Pro', daily: 'Daily', weekly: 'Weekly', monthly: 'Monthly', hours: 'hrs', planner: 'Planner', vocab: 'Vocab', writing: 'Writing', speaking: 'Speaking', addWord: 'Add Word', wordPlaceholder: 'Word...', defPlaceholder: 'Definition...', timeSpent: 'Minutes spent?', save: 'Save', setPin: 'Set your PIN', unlock: 'Enter PIN', confirm: 'Confirm PIN' },
+            ru: { title: 'IELTS Pro', daily: 'День', weekly: 'Неделя', monthly: 'Месяц', hours: 'ч', planner: 'План', vocab: 'Слова', writing: 'Письмо', speaking: 'Говорение', addWord: 'Добавить слово', wordPlaceholder: 'Слово...', defPlaceholder: 'Значение...', timeSpent: 'Сколько минут?', save: 'Сохранить', setPin: 'Установите ПИН', unlock: 'Введите ПИН', confirm: 'Подтвердите' },
+            uz: { title: 'IELTS Pro', daily: 'Kunlik', weekly: 'Haftalik', monthly: 'Oylik', hours: 'soat', planner: 'Reja', vocab: 'Lug\'at', writing: 'Yozish', speaking: 'Gapirish', addWord: 'So\'z qo\'shish', wordPlaceholder: 'So\'z...', defPlaceholder: 'Ma\'nosi...', timeSpent: 'Necha daqiqa?', save: 'Saqlash', setPin: 'PIN o\'rnating', unlock: 'PIN kiriting', confirm: 'Tasdiqlang' }
+        };
+
+        function App() {
+            const [user, setUser] = useState(null);
+            const [lang, setLang] = useState('en');
+            const [appState, setAppState] = useState('loading'); // loading, setup, lock, main
+            const [activeTab, setActiveTab] = useState('planner');
+            const [vocabCategory, setVocabCategory] = useState('writing');
+            
+            const [tasks, setTasks] = useState([]);
+            const [vocab, setVocab] = useState([]);
+            const [storedPin, setStoredPin] = useState(null);
+            const [pinInput, setPinInput] = useState("");
+            const [isConfirming, setIsConfirming] = useState(false);
+            const [tempPin, setTempPin] = useState("");
+            
+            const [isTaskModal, setIsTaskModal] = useState(false);
+            const [isTimeModal, setIsTimeModal] = useState(null);
+            const [timeInput, setTimeInput] = useState("");
+
+            const t = translations[lang];
+
+            useEffect(() => {
+                const loader = document.getElementById('loader');
+                if (loader) loader.classList.add('hidden-loader');
+                
+                const init = async () => {
+                    if (!firebaseConfig.apiKey) { setAppState('main'); return; }
+                    const app = initializeApp(firebaseConfig);
+                    const auth = getAuth(app);
+                    const db = getFirestore(app);
+                    const cred = await signInAnonymously(auth);
+                    setUser(cred.user);
+
+                    const secDoc = await getDoc(doc(db, `artifacts/${appId}/users/${cred.user.uid}/settings`, 'security'));
+                    if (secDoc.exists()) { setStoredPin(secDoc.data().pin); setAppState('lock'); }
+                    else setAppState('setup');
+
+                    onSnapshot(collection(db, `artifacts/${appId}/users/${cred.user.uid}/tasks`), snap => 
+                        setTasks(snap.docs.map(d => ({...d.data(), id: d.id}))));
+                    onSnapshot(collection(db, `artifacts/${appId}/users/${cred.user.uid}/vocab`), snap => 
+                        setVocab(snap.docs.map(d => ({...d.data(), id: d.id}))));
+                };
+                init();
+            }, []);
+
+            const stats = useMemo(() => {
+                const now = new Date();
+                const startOfDay = new Date(now.setHours(0,0,0,0)).getTime();
+                const startOfWeek = Date.now() - (7 * 24 * 60 * 60 * 1000);
+                const startOfMonth = Date.now() - (30 * 24 * 60 * 60 * 1000);
+                const calc = (since) => tasks.filter(tk => tk.completedAt >= since).reduce((acc, tk) => acc + (tk.minutes || 0), 0) / 60;
+                return { daily: calc(startOfDay).toFixed(1), weekly: calc(startOfWeek).toFixed(1), monthly: calc(startOfMonth).toFixed(1) };
+            }, [tasks]);
+
+            const handlePin = async (n) => {
+                let current = isConfirming ? tempPin : pinInput;
+                if (current.length >= 4) return;
+                const next = current + n;
+                if (appState === 'setup') {
+                    if (!isConfirming) { setPinInput(next); if (next.length === 4) setIsConfirming(true); }
+                    else { setTempPin(next); if (next.length === 4) {
+                        if (next === pinInput) {
+                            await setDoc(doc(getFirestore(), `artifacts/${appId}/users/${user.uid}/settings`, 'security'), {pin: next});
+                            setStoredPin(next); setAppState('main');
+                        } else { setIsConfirming(false); setPinInput(""); setTempPin(""); }
+                    }}
+                } else {
+                    setPinInput(next); if (next.length === 4) {
+                        if (next === storedPin) setAppState('main'); else setPinInput("");
+                    }
+                }
+            };
+
+            const completeTask = async () => {
+                if (!isTimeModal || !timeInput) return;
+                await setDoc(doc(getFirestore(), `artifacts/${appId}/users/${user.uid}/tasks`, isTimeModal.id), {
+                    ...isTimeModal, completed: true, completedAt: Date.now(), minutes: parseInt(timeInput)
+                });
+                setIsTimeModal(null); setTimeInput("");
+            };
+
+            if (appState === 'lock' || appState === 'setup') {
+                const dots = isConfirming ? tempPin : pinInput;
+                return (
+                    <div className="min-h-screen bg-white flex flex-col items-center justify-center p-8 select-none">
+                        <div className="w-20 h-20 bg-indigo-50 rounded-[2rem] flex items-center justify-center mb-8 text-indigo-600 shadow-xl">
+                            <Icon name={appState === 'setup' ? "shield-plus" : "lock"} size={40} />
+                        </div>
+                        <h2 className="text-xl font-black text-slate-800 mb-8 uppercase tracking-widest leading-none">
+                            {isConfirming ? t.confirm : (appState === 'setup' ? t.setPin : t.unlock)}
+                        </h2>
+                        <div className="flex gap-4 mb-12">
+                            {[0,1,2,3].map(i => <div key={i} className={`w-4 h-4 rounded-full border-2 border-indigo-100 pin-dot ${dots.length > i ? 'filled' : ''}`}></div>)}
+                        </div>
+                        <div className="grid grid-cols-3 gap-6 max-w-[280px]">
+                            {[1,2,3,4,5,6,7,8,9,0].map(n => (
+                                <button key={n} onClick={() => handlePin(n)} className={`w-16 h-16 rounded-2xl bg-slate-50 text-2xl font-black text-slate-700 shadow-sm active:bg-indigo-600 active:text-white transition-all numpad-btn ${n === 0 ? 'col-start-2' : ''}`}>{n}</button>
+                            ))}
+                        </div>
+                    </div>
+                );
+            }
+
+            return (
+                <div className="min-h-screen pb-24 max-w-lg mx-auto bg-slate-50 relative shadow-2xl overflow-hidden">
+                    <header className="bg-white/90 backdrop-blur-xl border-b p-5 sticky top-0 z-30 flex justify-between items-center px-6">
+                        <div className="flex items-center gap-3">
+                            <div className="bg-indigo-600 p-2 rounded-xl text-white shadow-lg shadow-indigo-200">
+                                <Icon name="graduation-cap" size={20} />
+                            </div>
+                            <h1 className="text-lg font-black text-slate-900 tracking-tight">{t.title}</h1>
+                        </div>
+                        <select value={lang} onChange={e => setLang(e.target.value)} className="bg-slate-100 text-[10px] font-black rounded-lg px-2 py-1 uppercase border-none outline-none">
+                            <option value="en">EN</option><option value="ru">RU</option><option value="uz">UZ</option>
+                        </select>
+                    </header>
+
+                    <main className="p-4 space-y-4">
+                        <div className="grid grid-cols-3 gap-3">
+                            {['daily', 'weekly', 'monthly'].map(p => (
+                                <div key={p} className="bg-white p-4 rounded-3xl border border-slate-100 shadow-sm text-center">
+                                    <p className="text-[10px] font-black text-slate-400 uppercase mb-1">{t[p]}</p>
+                                    <p className="text-xl font-black text-indigo-600 leading-none tracking-tight">{stats[p]} <span className="text-[10px] text-slate-300">{t.hours}</span></p>
+                                </div>
+                            ))}
+                        </div>
+
+                        <div className="flex bg-slate-200/50 p-1.5 rounded-2xl">
+                            {['planner', 'vocab'].map(tab => (
+                                <button key={tab} onClick={() => setActiveTab(tab)} className={`flex-1 py-3 rounded-xl text-xs font-black uppercase tracking-widest transition-all ${activeTab === tab ? 'bg-white text-indigo-600 shadow-sm' : 'text-slate-400'}`}>
+                                    {t[tab]}
+                                </button>
+                            ))}
+                        </div>
+
+                        {activeTab === 'planner' ? (
+                            <div className="space-y-3">
+                                {tasks.sort((a,b) => b.id - a.id).map(tk => (
+                                    <div key={tk.id} className={`bg-white p-5 rounded-[2rem] border flex items-center gap-4 transition-all ${tk.completed ? 'opacity-40 grayscale border-transparent' : 'border-slate-100 shadow-sm'}`}>
+                                        <button onClick={() => !tk.completed && setIsTimeModal(tk)} className={`w-12 h-12 rounded-2xl flex items-center justify-center transition-all ${tk.completed ? 'bg-indigo-600 text-white' : 'bg-slate-50 text-slate-300'}`}>
+                                            <Icon name={tk.completed ? "check" : "clock"} />
+                                        </button>
+                                        <div className="flex-1 min-w-0">
+                                            <p className={`font-bold text-slate-800 truncate ${tk.completed ? 'line-through text-slate-400' : ''}`}>{tk.title}</p>
+                                            {tk.completed && <p className="text-[9px] font-black text-indigo-500 uppercase">{tk.minutes} mins spent</p>}
+                                        </div>
+                                        <button onClick={async () => await deleteDoc(doc(getFirestore(), `artifacts/${appId}/users/${user.uid}/tasks`, tk.id))} className="text-slate-200"><Icon name="trash-2" size={18} /></button>
+                                    </div>
+                                ))}
+                            </div>
+                        ) : (
+                            <div className="space-y-4">
+                                <div className="flex gap-2">
+                                    {['writing', 'speaking'].map(cat => (
+                                        <button key={cat} onClick={() => setVocabCategory(cat)} className={`flex-1 py-3 rounded-2xl text-[10px] font-black uppercase tracking-tighter border-2 transition-all ${vocabCategory === cat ? 'bg-indigo-600 border-indigo-600 text-white' : 'border-slate-200 text-slate-400'}`}>
+                                            {t[cat]}
+                                        </button>
+                                    ))}
+                                </div>
+                                <div className="space-y-3">
+                                    {vocab.filter(v => v.category === vocabCategory).map(v => (
+                                        <div key={v.id} className="bg-white p-5 rounded-[2rem] border border-slate-100 shadow-sm flex justify-between items-start">
+                                            <div className="flex-1">
+                                                <h4 className="font-black text-slate-800 text-lg leading-tight">{v.word}</h4>
+                                                <p className="text-sm text-slate-500 mt-1">{v.definition}</p>
+                                            </div>
+                                            <button onClick={async () => await deleteDoc(doc(getFirestore(), `artifacts/${appId}/users/${user.uid}/vocab`, v.id))} className="text-slate-100 ml-4"><Icon name="trash-2" size={16} /></button>
+                                        </div>
+                                    ))}
+                                </div>
+                            </div>
+                        )}
+                    </main>
+
+                    <button onClick={() => setIsTaskModal(true)} className="fixed bottom-8 left-1/2 -translate-x-1/2 bg-indigo-600 text-white px-8 py-4 rounded-2xl shadow-2xl flex items-center gap-2 active:scale-95 transition-all z-40">
+                        <Icon name="plus" size={20} />
+                        <span className="font-black text-[10px] uppercase tracking-widest">{activeTab === 'planner' ? t.planner : t.vocab}</span>
+                    </button>
+
+                    {isTaskModal && (
+                        <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-50 flex items-end sm:items-center justify-center p-4">
+                            <div className="bg-white w-full max-w-sm rounded-[2.5rem] p-8 shadow-2xl animate-in slide-in-from-bottom duration-300">
+                                <h2 className="text-xl font-black text-slate-800 mb-6 uppercase tracking-tight leading-none">{activeTab === 'planner' ? 'New Plan' : t.addWord}</h2>
+                                {activeTab === 'planner' ? (
+                                    <input id="t-title" className="w-full bg-slate-100 p-5 rounded-2xl font-bold border-none outline-none mb-4" placeholder="Title..." />
+                                ) : (
+                                    <div className="space-y-3 mb-4">
+                                        <input id="v-word" className="w-full bg-slate-100 p-5 rounded-2xl font-bold border-none outline-none" placeholder={t.wordPlaceholder} />
+                                        <textarea id="v-def" className="w-full bg-slate-100 p-5 rounded-2xl font-bold border-none outline-none h-24" placeholder={t.defPlaceholder}></textarea>
+                                    </div>
+                                )}
+                                <button onClick={async () => {
+                                    const db = getFirestore();
+                                    if(activeTab === 'planner'){
+                                        const title = document.getElementById('t-title').value;
+                                        if(!title) return;
+                                        await setDoc(doc(db, `artifacts/${appId}/users/${user.uid}/tasks`, Date.now().toString()), {title, id: Date.now().toString(), completed: false});
+                                    } else {
+                                        const word = document.getElementById('v-word').value;
+                                        const definition = document.getElementById('v-def').value;
+                                        if(!word) return;
+                                        await setDoc(doc(db, `artifacts/${appId}/users/${user.uid}/vocab`, Date.now().toString()), {word, definition, category: vocabCategory, id: Date.now().toString()});
+                                    }
+                                    setIsTaskModal(false);
+                                }} className="w-full bg-indigo-600 text-white p-5 rounded-2xl font-black uppercase tracking-widest shadow-xl shadow-indigo-100">Save</button>
+                                <button onClick={() => setIsTaskModal(false)} className="w-full mt-2 p-3 text-slate-400 font-bold uppercase text-[10px]">Cancel</button>
+                            </div>
+                        </div>
+                    )}
+
+                    {isTimeModal && (
+                        <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+                            <div className="bg-white w-full max-w-xs rounded-[2.5rem] p-8 shadow-2xl text-center">
+                                <div className="w-16 h-16 bg-emerald-50 text-emerald-600 rounded-full flex items-center justify-center mx-auto mb-4"><Icon name="check" size={32} /></div>
+                                <h2 className="text-xl font-black text-slate-800 mb-2 leading-none uppercase tracking-tight">Well Done!</h2>
+                                <p className="text-xs font-bold text-slate-400 uppercase mb-6 tracking-widest leading-none">{t.timeSpent}</p>
+                                <input type="number" autoFocus className="w-full bg-slate-100 p-5 rounded-2xl font-black text-center text-3xl mb-4 border-none outline-none" value={timeInput} onChange={e => setTimeInput(e.target.value)} />
+                                <button onClick={completeTask} className="w-full bg-emerald-500 text-white p-5 rounded-2xl font-black uppercase tracking-widest shadow-xl shadow-emerald-100">Finish</button>
+                            </div>
+                        </div>
+                    )}
+                </div>
+            );
+        }
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+</body>
+</html>
