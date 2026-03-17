@@ -24,25 +24,35 @@
         .pin-dot { transition: all 0.2s ease; }
         .pin-dot.filled { background-color: #4f46e5; transform: scale(1.2); }
         .numpad-btn:active { background-color: #e2e8f0; transform: scale(0.9); }
-        /* Hidden input to trigger FaceID/AutoFill */
-        #hidden-pin-input { position: absolute; opacity: 0; pointer-events: none; }
+        select { -webkit-appearance: none; appearance: none; }
+        
+        /* Smooth loading state */
+        #loader { display: flex; align-items: center; justify-content: center; height: 100vh; width: 100vw; background: white; position: fixed; top: 0; left: 0; z-index: 100; transition: opacity 0.5s; }
+        .hidden-loader { opacity: 0; pointer-events: none; }
     </style>
 </head>
 <body class="bg-slate-50 overflow-x-hidden">
+    <div id="loader">
+        <div class="animate-spin rounded-full h-10 w-10 border-t-2 border-indigo-600"></div>
+    </div>
     <div id="root"></div>
 
     <script type="text/babel">
         const { useState, useMemo, useEffect, useRef } = React;
         const { initializeApp, getAuth, signInAnonymously, onAuthStateChanged, getFirestore, doc, setDoc, getDoc, onSnapshot, collection } = window.Firebase;
 
-        const firebaseConfig = JSON.parse(__firebase_config);
-        const app = initializeApp(firebaseConfig);
-        const auth = getAuth(app);
-        const db = getFirestore(app);
-        const appId = typeof __app_id !== 'undefined' ? __app_id : 'debt-tracker-secure-v2';
+        // --- Safe Configuration Handling ---
+        let firebaseConfig = {};
+        try {
+            firebaseConfig = JSON.parse(typeof __firebase_config !== 'undefined' ? __firebase_config : '{}');
+        } catch (e) {
+            console.error("Firebase config error:", e);
+        }
+
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'debt-tracker-v3';
 
         const Icon = ({ name, size = 24, className = "" }) => {
-            useEffect(() => { lucide.createIcons(); }, [name]);
+            useEffect(() => { if (window.lucide) window.lucide.createIcons(); }, [name]);
             return <i data-lucide={name} className={className} style={{ width: size, height: size }}></i>;
         };
 
@@ -50,17 +60,17 @@
             en: { 
                 title: 'DebtTrack', netBalance: 'Net Balance', setupTitle: 'Set your PIN', setupConfirm: 'Confirm your PIN', 
                 unlock: 'Enter PIN', wrongPin: 'Incorrect PIN', pinsNoMatch: 'PINs do not match', 
-                save: 'Save', newEntry: 'New Entry', noDebts: 'No data yet.'
+                save: 'Save', newEntry: 'New Entry', noDebts: 'No data yet.', configError: 'Connection Required'
             },
             ru: { 
                 title: 'Долги', netBalance: 'Баланс', setupTitle: 'Установите ПИН', setupConfirm: 'Подтвердите ПИН', 
                 unlock: 'Введите ПИН', wrongPin: 'Неверный ПИН', pinsNoMatch: 'ПИНы не совпадают', 
-                save: 'Сохранить', newEntry: 'Новая запись', noDebts: 'Нет данных.'
+                save: 'Сохранить', newEntry: 'Новая запись', noDebts: 'Нет данных.', configError: 'Нужно подключение'
             },
             uz: { 
                 title: 'Qarzlar', netBalance: 'Balans', setupTitle: 'PIN kodni oʻrnating', setupConfirm: 'PIN kodni tasdiqlang', 
                 unlock: 'PIN kodni kiriting', wrongPin: 'Xato PIN', pinsNoMatch: 'PIN kodlar mos kelmadi', 
-                save: 'Saqlash', newEntry: 'Yangi yozuv', noDebts: 'Maʼlumot yoʻq.'
+                save: 'Saqlash', newEntry: 'Yangi yozuv', noDebts: 'Maʼlumot yoʻq.', configError: 'Ulanish zarur'
             }
         };
 
@@ -68,7 +78,7 @@
             const [user, setUser] = useState(null);
             const [lang, setLang] = useState('en');
             const [debts, setDebts] = useState([]);
-            const [appState, setAppState] = useState('loading'); // loading, setup, lock, main
+            const [appState, setAppState] = useState('loading'); // loading, setup, lock, main, error
             const [storedPin, setStoredPin] = useState(null);
             
             const [pinInput, setPinInput] = useState("");
@@ -80,31 +90,44 @@
 
             const t = translations[lang];
 
-            // 1. Initial Auth and Pin Check
             useEffect(() => {
+                const loader = document.getElementById('loader');
+                if (loader) loader.classList.add('hidden-loader');
+                
                 const init = async () => {
-                    const cred = await signInAnonymously(auth);
-                    const userDoc = await getDoc(doc(db, `artifacts/${appId}/users/${cred.user.uid}/settings`, 'security'));
-                    
-                    if (userDoc.exists() && userDoc.data().pin) {
-                        setStoredPin(userDoc.data().pin);
-                        setAppState('lock');
-                    } else {
-                        setAppState('setup');
+                    if (!firebaseConfig.apiKey) {
+                        setAppState('error');
+                        return;
                     }
-                    setUser(cred.user);
+
+                    try {
+                        const app = initializeApp(firebaseConfig);
+                        const auth = getAuth(app);
+                        const db = getFirestore(app);
+                        
+                        const cred = await signInAnonymously(auth);
+                        const userDoc = await getDoc(doc(db, `artifacts/${appId}/users/${cred.user.uid}/settings`, 'security'));
+                        
+                        if (userDoc.exists() && userDoc.data().pin) {
+                            setStoredPin(userDoc.data().pin);
+                            setAppState('lock');
+                        } else {
+                            setAppState('setup');
+                        }
+                        setUser(cred.user);
+                        
+                        // Setup realtime listener for debts
+                        onSnapshot(collection(db, `artifacts/${appId}/users/${cred.user.uid}/debts`), (snap) => {
+                            setDebts(snap.docs.map(d => ({ ...d.data(), id: d.id })));
+                        });
+
+                    } catch (e) {
+                        console.error("Initialization failed", e);
+                        setAppState('error');
+                    }
                 };
                 init();
             }, []);
-
-            // 2. Sync Debts (Only if unlocked)
-            useEffect(() => {
-                if (!user || appState !== 'main') return;
-                const unsub = onSnapshot(collection(db, `artifacts/${appId}/users/${user.uid}/debts`), (snap) => {
-                    setDebts(snap.docs.map(d => ({ ...d.data(), id: d.id })));
-                });
-                return () => unsub();
-            }, [user, appState]);
 
             const handleNumpad = async (num) => {
                 setError("");
@@ -112,6 +135,8 @@
                 if (current.length >= 4) return;
                 
                 const newVal = current + num;
+                const db = getFirestore(initializeApp(firebaseConfig));
+
                 if (isConfirming) {
                     setConfirmPin(newVal);
                     if (newVal.length === 4) {
@@ -143,6 +168,7 @@
 
             const addDebt = async (e) => {
                 e.preventDefault();
+                const db = getFirestore(initializeApp(firebaseConfig));
                 const newId = Date.now().toString();
                 await setDoc(doc(db, `artifacts/${appId}/users/${user.uid}/debts`, newId), {
                     ...formData, amount: parseFloat(formData.amount), completed: false, date: new Date().toLocaleDateString()
@@ -151,9 +177,25 @@
                 setFormData({ name: '', amount: '', type: 'owed_to_me', note: '' });
             };
 
-            if (appState === 'loading') return <div className="min-h-screen flex items-center justify-center bg-white"><div className="animate-spin rounded-full h-8 w-8 border-t-2 border-indigo-600"></div></div>;
+            // --- Error State (Missing Config) ---
+            if (appState === 'error') {
+                return (
+                    <div className="min-h-screen bg-slate-50 flex flex-col items-center justify-center p-8 text-center">
+                        <div className="w-16 h-16 bg-rose-50 rounded-2xl flex items-center justify-center text-rose-500 mb-4">
+                            <Icon name="wifi-off" size={32} />
+                        </div>
+                        <h2 className="text-xl font-black text-slate-800 mb-2">{t.configError}</h2>
+                        <p className="text-slate-500 text-sm max-w-xs">
+                            The app is deployed but missing cloud credentials. Please ensure your Vercel project is correctly configured.
+                        </p>
+                    </div>
+                );
+            }
 
-            // --- LOCK / SETUP SCREEN ---
+            // --- Loading State ---
+            if (appState === 'loading') return null;
+
+            // --- Lock / Setup Screen ---
             if (appState === 'lock' || appState === 'setup') {
                 const displayPin = isConfirming ? confirmPin : pinInput;
                 return (
@@ -162,11 +204,11 @@
                             <div className="w-20 h-20 bg-indigo-50 rounded-3xl flex items-center justify-center mx-auto mb-4 text-indigo-600 shadow-inner">
                                 <Icon name={appState === 'setup' ? "shield-plus" : "lock"} size={40} />
                             </div>
-                            <h2 className="text-xl font-black text-slate-800 uppercase tracking-tight">
+                            <h2 className="text-xl font-black text-slate-800 uppercase tracking-tight leading-tight">
                                 {isConfirming ? t.setupConfirm : (appState === 'setup' ? t.setupTitle : t.unlock)}
                             </h2>
                             <div className="h-6 mt-2">
-                                {error && <p className="text-rose-500 text-xs font-bold animate-bounce">{error}</p>}
+                                {error && <p className="text-rose-500 text-xs font-bold animate-pulse">{error}</p>}
                             </div>
                         </div>
 
@@ -178,17 +220,17 @@
 
                         <div className="grid grid-cols-3 gap-6 max-w-[280px]">
                             {[1, 2, 3, 4, 5, 6, 7, 8, 9].map(num => (
-                                <button key={num} onClick={() => handleNumpad(num)} className="w-16 h-16 rounded-2xl bg-slate-50 flex items-center justify-center text-2xl font-black text-slate-700 numpad-btn transition-all shadow-sm">
+                                <button key={num} onClick={() => handleNumpad(num)} className="w-16 h-16 rounded-2xl bg-slate-50 flex items-center justify-center text-2xl font-black text-slate-700 active:bg-indigo-600 active:text-white transition-all shadow-sm">
                                     {num}
                                 </button>
                             ))}
                             <div className="flex items-center justify-center">
-                                <select value={lang} onChange={(e) => setLang(e.target.value)} className="bg-transparent text-[10px] font-black uppercase text-slate-400 border-none outline-none">
+                                <select value={lang} onChange={(e) => setLang(e.target.value)} className="bg-transparent text-[10px] font-black uppercase text-slate-400 border-none outline-none appearance-none cursor-pointer">
                                     <option value="en">EN</option><option value="ru">RU</option><option value="uz">UZ</option>
                                 </select>
                             </div>
-                            <button onClick={() => handleNumpad(0)} className="w-16 h-16 rounded-2xl bg-slate-50 flex items-center justify-center text-2xl font-black text-slate-700 numpad-btn transition-all shadow-sm">0</button>
-                            <button onClick={() => isConfirming ? setConfirmPin("") : setPinInput("")} className="w-16 h-16 rounded-2xl flex items-center justify-center text-slate-300">
+                            <button onClick={() => handleNumpad(0)} className="w-16 h-16 rounded-2xl bg-slate-50 flex items-center justify-center text-2xl font-black text-slate-700 active:bg-indigo-600 active:text-white transition-all shadow-sm">0</button>
+                            <button onClick={() => isConfirming ? setConfirmPin("") : setPinInput("")} className="w-16 h-16 rounded-2xl flex items-center justify-center text-slate-300 active:text-rose-500">
                                 <Icon name="delete" />
                             </button>
                         </div>
@@ -196,37 +238,50 @@
                 );
             }
 
-            // --- MAIN APP ---
+            // --- Main App ---
+            const totalBalance = debts.reduce((acc, d) => acc + (d.completed ? 0 : (d.type === 'owed_to_me' ? d.amount : -d.amount)), 0);
+
             return (
-                <div className="min-h-screen pb-24 bg-slate-50 max-w-lg mx-auto shadow-2xl overflow-hidden relative">
+                <div className="min-h-screen pb-24 bg-slate-50 max-w-lg mx-auto relative shadow-2xl overflow-hidden">
                     <header className="bg-white/90 backdrop-blur-xl border-b p-5 sticky top-0 z-30 flex justify-between items-center">
                         <div className="flex items-center gap-3">
-                            <div className="bg-indigo-600 p-2 rounded-xl text-white"><Icon name="wallet" size={20} /></div>
+                            <div className="bg-indigo-600 p-2 rounded-xl text-white shadow-lg shadow-indigo-200">
+                                <Icon name="wallet" size={20} />
+                            </div>
                             <h1 className="text-lg font-black text-slate-900 tracking-tight">{t.title}</h1>
                         </div>
-                        <button onClick={() => setAppState('lock')} className="p-2 text-slate-400"><Icon name="lock" size={20} /></button>
+                        <button onClick={() => { setPinInput(""); setAppState('lock'); }} className="p-2.5 bg-slate-100 rounded-xl text-slate-400 active:scale-95 transition-all">
+                            <Icon name="lock" size={18} />
+                        </button>
                     </header>
 
                     <main className="p-4 space-y-4">
-                        <div className="bg-indigo-600 p-6 rounded-[2rem] shadow-2xl text-white relative overflow-hidden">
-                            <p className="opacity-70 text-[10px] font-black uppercase tracking-widest mb-1">{t.netBalance}</p>
-                            <h2 className="text-4xl font-black">${debts.reduce((acc, d) => acc + (d.completed ? 0 : (d.type === 'owed_to_me' ? d.amount : -d.amount)), 0).toLocaleString()}</h2>
+                        <div className="bg-indigo-600 p-8 rounded-[2.5rem] shadow-2xl text-white relative overflow-hidden">
+                            <div className="relative z-10">
+                                <p className="opacity-70 text-[10px] font-black uppercase tracking-widest mb-1">{t.netBalance}</p>
+                                <h2 className="text-4xl font-black tracking-tight">${totalBalance.toLocaleString()}</h2>
+                            </div>
+                            <div className="absolute top-[-20%] right-[-10%] w-40 h-40 bg-white/10 rounded-full blur-3xl"></div>
                         </div>
 
                         <div className="space-y-3 pt-4">
                             {debts.length === 0 ? <div className="text-center py-20 text-slate-300 font-bold">{t.noDebts}</div> : 
                                 debts.sort((a,b) => b.id - a.id).map(debt => (
-                                    <div key={debt.id} onClick={async () => await setDoc(doc(db, `artifacts/${appId}/users/${user.uid}/debts`, debt.id), {...debt, completed: !debt.completed})} 
-                                         className={`bg-white p-4 rounded-2xl border flex items-center gap-4 transition-all active:scale-95 ${debt.completed ? 'opacity-30 grayscale' : 'border-slate-100 shadow-sm'}`}>
-                                        <div className={`w-12 h-12 rounded-xl flex items-center justify-center ${debt.type === 'owed_to_me' ? 'bg-emerald-50 text-emerald-600' : 'bg-rose-50 text-rose-600'}`}>
+                                    <div key={debt.id} 
+                                         onClick={async () => {
+                                             const db = getFirestore(initializeApp(firebaseConfig));
+                                             await setDoc(doc(db, `artifacts/${appId}/users/${user.uid}/debts`, debt.id), {...debt, completed: !debt.completed});
+                                         }} 
+                                         className={`bg-white p-4 rounded-[1.5rem] border flex items-center gap-4 transition-all active:scale-95 ${debt.completed ? 'opacity-30 grayscale border-transparent' : 'border-slate-100 shadow-sm'}`}>
+                                        <div className={`w-12 h-12 rounded-2xl flex items-center justify-center ${debt.type === 'owed_to_me' ? 'bg-emerald-50 text-emerald-600' : 'bg-rose-50 text-rose-600'}`}>
                                             <Icon name={debt.type === 'owed_to_me' ? "arrow-down-left" : "arrow-up-right"} />
                                         </div>
-                                        <div className="flex-1">
-                                            <p className="font-bold text-slate-800">{debt.name}</p>
-                                            <p className="text-[10px] text-slate-400 font-black">{debt.date}</p>
+                                        <div className="flex-1 min-w-0">
+                                            <p className={`font-bold text-slate-800 truncate ${debt.completed ? 'line-through text-slate-400' : ''}`}>{debt.name}</p>
+                                            <p className="text-[10px] text-slate-400 font-black tracking-wider uppercase">{debt.date}</p>
                                         </div>
                                         <p className={`font-black text-lg ${debt.type === 'owed_to_me' ? 'text-emerald-600' : 'text-rose-600'}`}>
-                                            {debt.type === 'owed_to_me' ? '+' : '-'}${debt.amount}
+                                            {debt.type === 'owed_to_me' ? '+' : '-'}${debt.amount.toLocaleString()}
                                         </p>
                                     </div>
                                 ))
@@ -234,27 +289,38 @@
                         </div>
                     </main>
 
-                    <button onClick={() => setIsModalOpen(true)} className="fixed bottom-8 right-8 bg-indigo-600 text-white w-14 h-14 rounded-full shadow-2xl flex items-center justify-center active:scale-90 transition-all z-40">
-                        <Icon name="plus" size={28} />
+                    <button onClick={() => setIsModalOpen(true)} className="fixed bottom-8 right-8 bg-indigo-600 text-white w-16 h-16 rounded-[1.5rem] shadow-2xl flex items-center justify-center active:scale-90 transition-all z-40">
+                        <Icon name="plus" size={32} />
                     </button>
 
                     {isModalOpen && (
                         <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-50 flex items-end sm:items-center justify-center p-4">
                             <div className="bg-white w-full max-w-sm rounded-[2.5rem] p-8 shadow-2xl animate-in slide-in-from-bottom duration-300">
                                 <div className="flex justify-between items-center mb-6">
-                                    <h2 className="text-xl font-black text-slate-800">{t.newEntry}</h2>
-                                    <button onClick={() => setIsModalOpen(false)} className="text-slate-300"><Icon name="x" /></button>
+                                    <h2 className="text-xl font-black text-slate-800 tracking-tight">{t.newEntry}</h2>
+                                    <button onClick={() => setIsModalOpen(false)} className="p-2 text-slate-300"><Icon name="x" /></button>
                                 </div>
                                 <form onSubmit={addDebt} className="space-y-4">
-                                    <input required className="w-full bg-slate-100 p-4 rounded-2xl font-bold placeholder:text-slate-300 outline-none focus:ring-2 focus:ring-indigo-500" placeholder="Name" onChange={e => setFormData({...formData, name: e.target.value})} />
-                                    <div className="grid grid-cols-2 gap-3">
-                                        <input required type="number" step="0.01" className="w-full bg-slate-100 p-4 rounded-2xl font-bold" placeholder="0.00" onChange={e => setFormData({...formData, amount: e.target.value})} />
-                                        <select className="w-full bg-slate-100 p-4 rounded-2xl font-black text-xs uppercase" onChange={e => setFormData({...formData, type: e.target.value})}>
-                                            <option value="owed_to_me">Owed to me</option>
-                                            <option value="i_owe">I owe</option>
-                                        </select>
+                                    <div className="space-y-1">
+                                        <label className="text-[10px] font-black uppercase text-slate-400 ml-1">Who is it?</label>
+                                        <input required className="w-full bg-slate-100 p-4 rounded-2xl font-bold placeholder:text-slate-300 outline-none focus:ring-2 focus:ring-indigo-500 transition-all border-none" placeholder="Name" value={formData.name} onChange={e => setFormData({...formData, name: e.target.value})} />
                                     </div>
-                                    <button type="submit" className="w-full bg-indigo-600 text-white p-5 rounded-2xl font-black shadow-xl shadow-indigo-200 mt-4 active:scale-95 transition-all">{t.save}</button>
+                                    <div className="grid grid-cols-2 gap-3">
+                                        <div className="space-y-1">
+                                            <label className="text-[10px] font-black uppercase text-slate-400 ml-1">Amount</label>
+                                            <input required type="number" step="0.01" className="w-full bg-slate-100 p-4 rounded-2xl font-bold border-none" placeholder="0.00" value={formData.amount} onChange={e => setFormData({...formData, amount: e.target.value})} />
+                                        </div>
+                                        <div className="space-y-1">
+                                            <label className="text-[10px] font-black uppercase text-slate-400 ml-1">Type</label>
+                                            <select className="w-full bg-slate-100 p-4 rounded-2xl font-black text-xs uppercase border-none" value={formData.type} onChange={e => setFormData({...formData, type: e.target.value})}>
+                                                <option value="owed_to_me">Owed to me</option>
+                                                <option value="i_owe">I owe</option>
+                                            </select>
+                                        </div>
+                                    </div>
+                                    <button type="submit" className="w-full bg-indigo-600 text-white p-5 rounded-[1.5rem] font-black shadow-xl shadow-indigo-100 mt-4 active:scale-95 transition-all">
+                                        {t.save}
+                                    </button>
                                 </form>
                             </div>
                         </div>
